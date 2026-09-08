@@ -9,8 +9,14 @@
     CLIENT_SECRET: '089c98d283a30377272c3ea13d2691087b00dd1a',
     SCOPE: 'activity:write,activity:read_all',
     LOGIN_URL: 'https://www.onelap.cn/api/login',
-    LIST_URL: 'https://u.onelap.cn/analysis/list',
     UA: 'Onelap/3.10.0 (iPhone; iOS 15.0)',
+    UA2: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    // 顽鹿新版 OTM 接口（旧版 /analysis/list 已废弃，返回 404）
+    U_BASE: 'https://u.onelap.cn',
+    OTM_LIST: 'https://u.onelap.cn/api/otm/ride_record/list',
+    OTM_DETAIL: 'https://u.onelap.cn/api/otm/ride_record/analysis/{id}',
+    OTM_FIT: 'https://u.onelap.cn/api/otm/ride_record/analysis/fit_content/{key}',
+    SIGN_KEY: 'fe9f8382418fcdeb136461cac6acae7b',
     ST_TOKEN: 'https://www.strava.com/oauth/token',
     ST_API: 'https://www.strava.com/api/v3'
   };
@@ -64,15 +70,108 @@
     });
   }
 
-  // 顽鹿活动列表
-  function onelapList(token) {
-    var url = CFG.LIST_URL + '?token=' + encodeURIComponent(token) +
+  /* ---- 顽鹿新版 OTM 接口 ---- */
+
+  function randStr(n) {
+    var s = 'abcdefghijklmnopqrstuvwxyz0123456789', out = '';
+    for (var i = 0; i < n; i++) out += s.charAt(Math.floor(Math.random() * s.length));
+    return out;
+  }
+
+  // 签名：参数按 key 升序拼 k=v，末尾加 &key=xxx，取 md5
+  function signFor(params) {
+    var nonce = randStr(16);
+    var ts = String(Math.floor(Date.now() / 1000));
+    var all = {};
+    Object.keys(params || {}).forEach(function (k) {
+      var v = params[k];
+      if (v !== null && v !== undefined && v !== '') all[k] = v;
+    });
+    all.nonce = nonce;
+    all.timestamp = ts;
+    var parts = Object.keys(all).sort().map(function (k) { return k + '=' + all[k]; });
+    var raw = parts.join('&') + '&key=' + CFG.SIGN_KEY;
+    return { nonce: nonce, timestamp: ts, sign: window.md5(raw), raw: raw };
+  }
+
+  function otmHeaders(token) {
+    return {
+      'Content-Type': 'application/json',
+      'Authorization': token,
+      'User-Agent': CFG.UA2,
+      'Referer': CFG.U_BASE + '/recordPage'
+    };
+  }
+
+  // mode: body(签名放 body) / query(签名放 url) / header(签名放 header, 可能被 CORS 拦) / none
+  function otmList(token, mode) {
+    var payload = { page: 1, limit: 50 };
+    var sg = signFor(payload);
+    var url = CFG.OTM_LIST;
+    var body = { page: 1, limit: 50 };
+    var hdrs = otmHeaders(token);
+
+    if (mode === 'body') {
+      body.nonce = sg.nonce; body.timestamp = sg.timestamp; body.sign = sg.sign;
+    } else if (mode === 'query') {
+      url += '?nonce=' + sg.nonce + '&timestamp=' + sg.timestamp + '&sign=' + sg.sign;
+    } else if (mode === 'header') {
+      hdrs.nonce = sg.nonce; hdrs.timestamp = sg.timestamp; hdrs.sign = sg.sign;
+    }
+    return request(url, {
+      method: 'POST', headers: hdrs, body: JSON.stringify(body)
+    }).then(function (r) { return r.json(); });
+  }
+
+  function oldList(token) {
+    var url = CFG.U_BASE + '/analysis/list?token=' + encodeURIComponent(token) +
       '&limit=100&type=all&page=1';
     return request(url, {
       headers: { 'User-Agent': CFG.UA, 'Accept': 'application/json' }
-    }).then(function (r) { return r.json(); }).then(function (j) {
-      return (j && (j.data || j.list || j.records)) || [];
-    });
+    }).then(function (r) { return r.json(); });
+  }
+
+  function pickList(j) {
+    if (!j) return null;
+    if (j.data && Array.isArray(j.data.list)) return j.data.list;
+    if (Array.isArray(j.data)) return j.data;
+    if (Array.isArray(j.list)) return j.list;
+    if (Array.isArray(j.records)) return j.records;
+    return null;
+  }
+
+  // 依次尝试多种取列表方式，返回 { list, via, report }
+  function onelapList(token) {
+    var tries = [
+      { name: '新版OTM·签名在body', fn: function () { return otmList(token, 'body'); } },
+      { name: '新版OTM·签名在query', fn: function () { return otmList(token, 'query'); } },
+      { name: '新版OTM·无签名', fn: function () { return otmList(token, 'none'); } },
+      { name: '旧版analysis/list', fn: function () { return oldList(token); } }
+    ];
+    var report = [];
+    var i = 0;
+
+    function next() {
+      if (i >= tries.length) {
+        var err = new Error('所有取列表方式都失败');
+        err.report = report;
+        throw err;
+      }
+      var t = tries[i++];
+      return t.fn().then(function (j) {
+        var list = pickList(j);
+        var line = t.name + ' → ' + JSON.stringify(j).slice(0, 220);
+        report.push(line);
+        if (list && list.length !== undefined) {
+          return { list: list, via: t.name, report: report };
+        }
+        return next();
+      }, function (e) {
+        report.push(t.name + ' → 请求失败: ' + e.message);
+        return next();
+      });
+    }
+    return next();
   }
 
   // Strava：用 refresh_token 换 access_token（Strava 会轮换 refresh_token，必须回存）
@@ -119,8 +218,8 @@
     });
   }
 
-  // 下载 FIT：先直连，失败再走备用代理
-  function fetchFit(rawUrl) {
+  // 下载 FIT（直连，失败再走备用代理）
+  function fetchFitUrl(rawUrl) {
     var url = String(rawUrl).replace(/^http:\/\//i, 'https://');
     return request(url, { mode: 'cors' })
       .then(function (r) { return r.arrayBuffer(); })
@@ -136,6 +235,62 @@
         }, Promise.reject(err));
         return chain.catch(function () { throw new Error('FIT 下载失败：' + err.message); });
       });
+  }
+
+  function b64(s) { return btoa(unescape(encodeURIComponent(String(s)))); }
+
+  var FIT_KEYS = ['fitUrl', 'fit_url', 'fit', 'fitKey', 'fitkey', 'fileKey', 'file_key', 'durl'];
+
+  function fitCandidate(obj) {
+    if (!obj || typeof obj !== 'object') return '';
+    for (var i = 0; i < FIT_KEYS.length; i++) {
+      var v = obj[FIT_KEYS[i]];
+      if (v && String(v).trim()) return String(v).trim();
+    }
+    return '';
+  }
+
+  function recId(rec) {
+    return rec.id || rec.record_id || rec.ride_record_id || rec.rid || rec.activityId || '';
+  }
+
+  // 新版：先取详情拿 fitUrl，再走 fit_content/{base64}
+  function fetchFitViaDetail(rec, token) {
+    var id = recId(rec);
+    if (!id) throw new Error('记录缺少 ID，无法取详情');
+    return request(CFG.OTM_DETAIL.replace('{id}', encodeURIComponent(id)), {
+      headers: { 'Authorization': token, 'User-Agent': CFG.UA2, 'Referer': CFG.U_BASE + '/recordPage' }
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      var fk = fitCandidate(j && j.data) || fitCandidate(j) || fitCandidate(rec);
+      if (!fk) throw new Error('详情里没找到 fitUrl');
+      var cands = [fk];
+      try { var d = decodeURIComponent(fk); if (d !== fk) cands.push(d); } catch (e) {}
+      if (/^https?:/i.test(fk)) {
+        try {
+          var p = new URL(fk).pathname;
+          if (p) { cands.push(p); cands.push(p.split('/').pop()); }
+        } catch (e) {}
+      } else if (fk.indexOf('/') >= 0) {
+        cands.push(fk.split('/').pop());
+      }
+      var i = 0;
+      function next() {
+        if (i >= cands.length) throw new Error('fit_content 全部候选都失败');
+        var c = cands[i++];
+        return request(CFG.OTM_FIT.replace('{key}', encodeURIComponent(b64(c))), {
+          headers: { 'Authorization': token, 'User-Agent': CFG.UA2 }
+        }).then(function (r) { return r.arrayBuffer(); }, function () { return next(); });
+      }
+      return next();
+    });
+  }
+
+  function fetchFitFor(rec, token) {
+    var direct = fitCandidate(rec);
+    if (direct && /^https?:/i.test(direct)) {
+      return fetchFitUrl(direct).catch(function () { return fetchFitViaDetail(rec, token); });
+    }
+    return fetchFitViaDetail(rec, token);
   }
 
   function uploadFit(accessToken, buf, filename) {
@@ -190,7 +345,7 @@
     'rSynced', 'rSkipped', 'rFailed', 'rTotal', 'statusText',
     'overlay', 'rider', 'progressFill', 'progressPct', 'syncStep', 'logBox',
     'btnCloseOverlay', 'btnClearDone', 'hintSelf', 'hintLocal', 'cbDomain',
-    'btnCopyDomain', 'resetSection'].forEach(function (id) { els[id] = $(id); });
+    'btnCopyDomain', 'resetSection', 'btnDiag', 'btnCopyDiag'].forEach(function (id) { els[id] = $(id); });
 
   function setState(o) { Object.keys(o).forEach(function (k) { state[k] = o[k]; }); render(); }
 
@@ -345,7 +500,17 @@
     var synced = 0, skipped = 0, failed = 0, total = 0, pending = 0;
     var onelapToken = '', accessToken = '';
 
-    return onelapLogin(acc, pwd)
+    // 兼容新旧字段取开始时间（毫秒）
+  function startTimeOf(a) {
+    var v = a.activity_time || a.start_riding_time || a.startTime || a.startRidingTime ||
+      a.start_time || a.created_at || a.date;
+    if (!v) return 0;
+    if (typeof v === 'number') return v > 1e11 ? v : v * 1000;
+    var t = new Date(v).getTime();
+    return isNaN(t) ? 0 : t;
+  }
+
+  return onelapLogin(acc, pwd)
       .then(function (r) {
         onelapToken = r.token;
         if (r.user) { S.setJSON(K.user, r.user); state.user = r.user; }
@@ -353,12 +518,12 @@
         log('顽鹿登录成功：' + (r.user && r.user.nickname));
         return onelapList(onelapToken);
       })
-      .then(function (list) {
+      .then(function (res) {
+        if (res.report) res.report.forEach(function (l) { log('· ' + l); });
+        log('取列表方式：' + res.via);
+        var list = res.list;
         progress(28, '正在筛选最近 ' + sinceDays + ' 天的记录…');
-        var acts = list.filter(function (a) {
-          var t = a.startRidingTime || (a.start_time ? new Date(a.start_time).getTime() : 0);
-          return t > since;
-        });
+        var acts = list.filter(function (a) { return startTimeOf(a) > since; });
         total = acts.length;
         log('顽鹿共 ' + list.length + ' 条，范围内 ' + total + ' 条');
         if (!total) throw { soft: true, msg: '最近 ' + sinceDays + ' 天没有顽鹿记录' };
@@ -384,10 +549,10 @@
         var times = ctx.times;
         var todo = [];
         ctx.acts.forEach(function (a) {
-          var startMs = a.startRidingTime || (a.start_time ? new Date(a.start_time).getTime() : 0);
+          var startMs = startTimeOf(a);
           var startSec = Math.floor(startMs / 1000);
           a.__startSec = startSec;
-          a.__id = String(a.id || a.activityId || startSec);
+          a.__id = String(recId(a) || a.activityId || startSec);
           if (doneMap[a.__id]) { skipped++; return; }
           if (times.some(function (t) { return Math.abs(t - startSec) < 180; })) { skipped++; return; }
           todo.push(a);
@@ -402,12 +567,7 @@
           var a = batch[i];
           var pct = 55 + Math.round((i / batch.length) * 44);
           progress(pct, '正在上传第 ' + (i + 1) + '/' + batch.length + ' 条…');
-          var fitUrl = a.durl || a.fit_url || a.fileKey || '';
-          if (!fitUrl || !/^https?:/i.test(fitUrl)) {
-            log('× 无 FIT 链接，跳过 #' + a.__id, 'err');
-            failed++; i++; return next();
-          }
-          return fetchFit(fitUrl)
+          return fetchFitFor(a, onelapToken)
             .then(function (buf) {
               return uploadFit(accessToken, buf, 'onelap_' + a.__id + '_' + a.__startSec + '.fit');
             })
@@ -477,6 +637,65 @@
   }
 
   /* ---------------- 事件绑定 ---------------- */
+
+  /* ---------------- 接口诊断 ---------------- */
+
+  var diagText = '';
+
+  function runDiag() {
+    if (busy) return;
+    if (!state.acc || !state.pwd) { setStatus('请先完成顽鹿登录再做诊断'); return; }
+    busy = true;
+    els.btnDiag.disabled = true;
+    diagText = '';
+    openOverlay();
+    els.btnCopyDiag.classList.add('hidden');
+    progress(5, '诊断中…');
+
+    var lines = [];
+    return onelapLogin(state.acc, state.pwd)
+      .then(function (r) {
+        var token = r.token;
+        lines.push('登录成功，token = ' + token);
+        log('登录成功，token = ' + token.slice(0, 14) + '…', 'ok');
+
+        var modes = [
+          ['新版OTM·签名在body', function () { return otmList(token, 'body'); }],
+          ['新版OTM·签名在query', function () { return otmList(token, 'query'); }],
+          ['新版OTM·无签名', function () { return otmList(token, 'none'); }],
+          ['新版OTM·签名在header', function () { return otmList(token, 'header'); }],
+          ['旧版analysis/list', function () { return oldList(token); }]
+        ];
+        var i = 0;
+        function next() {
+          if (i >= modes.length) return Promise.resolve();
+          var m = modes[i++];
+          progress(Math.round(i / modes.length * 95) + 5, '诊断：' + m[0]);
+          return m[1]().then(function (j) {
+            var s = JSON.stringify(j);
+            lines.push('【' + m[0] + '】' + s.slice(0, 800));
+            log('【' + m[0] + '】' + s.slice(0, 260), (j && j.code && j.code !== 200) ? 'err' : 'ok');
+          }, function (e) {
+            lines.push('【' + m[0] + '】请求失败: ' + e.message);
+            log('【' + m[0] + '】请求失败: ' + e.message, 'err');
+          }).then(next);
+        }
+        return next();
+      })
+      .catch(function (e) {
+        lines.push('登录失败: ' + e.message);
+        log('× 登录失败：' + e.message, 'err');
+      })
+      .then(function () {
+        diagText = lines.join('\n\n');
+        progress(100, '诊断完成');
+        els.btnCopyDiag.classList.remove('hidden');
+        els.btnCloseOverlay.classList.remove('hidden');
+        setStatus('诊断完成，点「复制诊断结果」把结果发我');
+        busy = false;
+        els.btnDiag.disabled = false;
+      });
+  }
 
   function init() {
     els.inpAcc.value = state.acc;
@@ -565,6 +784,13 @@
 
     els.btnSync.addEventListener('click', doSync);
     els.btnCloseOverlay.addEventListener('click', closeOverlay);
+
+    els.btnDiag.addEventListener('click', runDiag);
+    els.btnCopyDiag.addEventListener('click', function () {
+      if (navigator.clipboard) navigator.clipboard.writeText(diagText);
+      els.btnCopyDiag.textContent = '已复制';
+      setTimeout(function () { els.btnCopyDiag.textContent = '复制诊断结果'; }, 1500);
+    });
 
     els.btnReset.addEventListener('click', function () {
       if (!confirm('确定要清除本机保存的所有登录信息吗？')) return;

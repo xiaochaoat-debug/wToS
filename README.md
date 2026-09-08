@@ -37,10 +37,17 @@
 | 步骤 | 接口 |
 | --- | --- |
 | 顽鹿登录 | `POST https://www.onelap.cn/api/login`（密码 MD5） |
-| 活动列表 | `GET https://u.onelap.cn/analysis/list?token=…` |
+| 活动列表 | `POST https://u.onelap.cn/api/otm/ride_record/list`（Authorization + md5 签名） |
+| 活动详情 | `GET https://u.onelap.cn/api/otm/ride_record/analysis/{id}` |
+| 下载 FIT | `GET https://u.onelap.cn/api/otm/ride_record/analysis/fit_content/{base64(fitUrl)}` |
 | Strava 换票 | `POST https://www.strava.com/oauth/token` |
 | 查重 | `GET https://www.strava.com/api/v3/athlete/activities` |
 | 上传 | `POST https://www.strava.com/api/v3/uploads`（multipart，data_type=fit） |
+
+> 顽鹿旧的 `u.onelap.cn/analysis/list` 已经失效（返回 404），现在走新版 OTM 接口。
+> 新版签名头 `nonce/timestamp/sign` 不在 CORS 白名单里，所以签名放在请求体里传；
+> 页面会自动依次尝试「签名在 body → 签名在 query → 无签名 → 旧接口」，取第一个能拿到数据的。
+> 设置里有「诊断顽鹿接口」按钮，会把每种方式的原始返回打出来，方便排查。
 
 顽鹿和 Strava 的接口都返回 `Access-Control-Allow-Origin: *`，所以浏览器可以直连，不需要自建代理。
 只有个别地区的顽鹿 FIT 下载 CDN 可能缺 CORS 头，此时会自动降级到公共代理；
