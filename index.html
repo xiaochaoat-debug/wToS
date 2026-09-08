@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>数据搬运工 · 顽鹿 → Strava</title>
+<meta name="description" content="把顽鹿运动（Onelap）的骑行记录一键同步到 Strava，纯前端本地存储，免费可用。" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚴</text></svg>" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div class="page">
+
+  <header class="header">
+    <span class="brand">You are not friendly to bread</span>
+    <span class="top-dot" id="topDot"></span>
+  </header>
+
+  <div class="title-section">
+    <h1 class="h1">数据搬运工</h1>
+    <p class="p">极简、纯粹、无感同步 · 顽鹿 → Strava</p>
+  </div>
+
+  <!-- 连接状态 -->
+  <div class="status-bar">
+    <div class="status-item" id="stOnelap">
+      <span class="dot"></span>
+      <span class="status-label">顽鹿</span>
+      <span class="status-val" id="onelapVal">未连接</span>
+    </div>
+    <div class="status-divider"></div>
+    <div class="status-item" id="stStrava">
+      <span class="dot"></span>
+      <span class="status-label">Strava</span>
+      <span class="status-val" id="stravaVal">未授权</span>
+    </div>
+  </div>
+
+  <!-- 卡片 01 顽鹿 -->
+  <section class="card" id="cardOnelap">
+    <div class="card-header">
+      <span class="card-num">01</span>
+      <span class="card-title">顽鹿运动 / Onelap</span>
+    </div>
+
+    <div id="onelapForm">
+      <input class="inp" id="inpAcc" type="text" placeholder="顽鹿账号（手机号 / 邮箱）" autocomplete="username" />
+      <input class="inp" id="inpPwd" type="password" placeholder="密码" autocomplete="current-password" />
+      <button class="btn-primary" id="btnLogin">身份验证</button>
+    </div>
+
+    <div class="user-info hidden" id="onelapDone">
+      <div class="user-info-left">
+        <span class="user-name" id="onelapName">骑友</span>
+        <span class="user-sub">账号已验证 · 凭证仅保存在本机浏览器</span>
+      </div>
+      <span class="tick">✓</span>
+    </div>
+  </section>
+
+  <!-- 卡片 02 Strava -->
+  <section class="card" id="cardStrava">
+    <div class="card-header">
+      <span class="card-num">02</span>
+      <span class="card-title">Strava 授权</span>
+    </div>
+
+    <div id="stravaForm">
+      <div class="mode-pick">
+        <label class="mode-opt">
+          <input type="radio" name="cbMode" value="self" checked />
+          <span>自动回调（推荐）</span>
+        </label>
+        <label class="mode-opt">
+          <input type="radio" name="cbMode" value="localhost" />
+          <span>手动粘贴</span>
+        </label>
+      </div>
+
+      <div class="hint" id="hintSelf">
+        需要在 Strava 后台把 <b>Authorization Callback Domain</b> 改成
+        <code id="cbDomain">xiaochaoat-debug.github.io</code>
+        <button class="mini-btn" id="btnCopyDomain" type="button">复制</button>
+        <br />改一次即可长期有效，之后点按钮授权会自动跳回来。
+      </div>
+      <div class="hint hidden" id="hintLocal">
+        授权后浏览器会跳到打不开的 <code>localhost/?code=…</code>，把整条地址复制回来粘到下面输入框即可。
+      </div>
+
+      <button class="btn-primary" id="btnStrava">连接 Strava</button>
+
+      <input class="inp mt" id="inpCode" type="text" placeholder="粘贴授权后浏览器地址栏的完整链接" />
+      <button class="btn-primary btn-ghost" id="btnBind">确认绑定</button>
+    </div>
+
+    <div class="user-info hidden" id="stravaDone">
+      <div class="user-info-left">
+        <span class="user-name">通道已建立</span>
+        <span class="user-sub">授权长期有效，无需重复授权</span>
+      </div>
+      <span class="tick">✓</span>
+    </div>
+  </section>
+
+  <!-- 同步区 -->
+  <div id="syncArea" class="hidden">
+
+    <div class="settings-bar" id="btnToggleSettings">
+      <span class="settings-label">同步设置</span>
+      <span class="settings-arrow" id="settingsArrow">▼</span>
+    </div>
+
+    <div class="settings-panel hidden" id="settingsPanel">
+      <div class="settings-row">
+        <span class="settings-key">同步最近</span>
+        <div class="days-picker" id="daysPicker">
+          <button class="day-opt" data-days="7">7天</button>
+          <button class="day-opt" data-days="30">30天</button>
+          <button class="day-opt" data-days="90">90天</button>
+          <button class="day-opt" data-days="365">全部</button>
+        </div>
+      </div>
+
+      <div class="settings-row">
+        <span class="settings-key">单次最多上传</span>
+        <div class="days-picker" id="maxPicker">
+          <button class="day-opt" data-max="5">5条</button>
+          <button class="day-opt" data-max="10">10条</button>
+          <button class="day-opt" data-max="20">20条</button>
+        </div>
+      </div>
+
+      <div class="settings-row col">
+        <span class="settings-key">FIT 下载备用代理（一般不用填）</span>
+        <input class="inp slim" id="inpProxy" type="text" placeholder="https://your-worker.workers.dev/?url=" />
+      </div>
+
+      <p class="settings-tip">
+        只上传该时间范围内、Strava 中还没有的记录。已同步过的记录会记在本机，重复点击不会重复上传。
+      </p>
+      <button class="mini-btn danger" id="btnClearDone" type="button">清除本地去重记录</button>
+    </div>
+
+    <div class="last-result hidden" id="lastResult">
+      <span class="last-result-title" id="lastResultTitle">上次同步</span>
+      <div class="result-row">
+        <div class="result-item"><span class="result-num green" id="rSynced">0</span><span class="result-lbl">新增</span></div>
+        <div class="result-item"><span class="result-num grey" id="rSkipped">0</span><span class="result-lbl">已有</span></div>
+        <div class="result-item"><span class="result-num grey" id="rFailed">0</span><span class="result-lbl">失败</span></div>
+        <div class="result-item"><span class="result-num blue" id="rTotal">0</span><span class="result-lbl">共检查</span></div>
+      </div>
+    </div>
+
+    <div class="sync-section">
+      <button class="btn-main" id="btnSync">开始同步</button>
+      <span class="status-text" id="statusText">准备就绪</span>
+    </div>
+  </div>
+
+  <div class="reset-section" id="resetSection">
+    <button class="reset-link" id="btnReset" type="button">重置所有授权</button>
+  </div>
+
+  <footer class="foot">
+    纯静态页面，所有凭证只存在你自己的浏览器 localStorage 里，不会上传到任何服务器。<br />
+    页面地址即 Strava 回调地址，请勿随意更换域名。
+  </footer>
+</div>
+
+<!-- 同步进度遮罩 -->
+<div class="sync-overlay hidden" id="overlay">
+  <div class="sync-card">
+    <div class="rider-wrap"><span class="rider-emoji rider-go" id="rider">🚴</span></div>
+    <div class="progress-track"><div class="progress-fill" id="progressFill"></div><span class="flag-icon">🚩</span></div>
+    <span class="progress-pct" id="progressPct">0%</span>
+    <span class="sync-step-text" id="syncStep">准备中…</span>
+    <div class="log-box" id="logBox"></div>
+    <button class="btn-primary btn-ghost hidden" id="btnCloseOverlay">关闭</button>
+  </div>
+</div>
+
+<script src="md5.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
