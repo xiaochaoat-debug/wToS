@@ -663,9 +663,16 @@
           var m = (e && e.message) || String(e);
           progress(100, '同步中断');
           log('× ' + m, 'err');
-          setStatus('同步失败：' + m);
-          if (/refresh_token|授权失效|invalid_grant/i.test(m)) {
+          if (/Inactive/i.test(m)) {
+            setStatus('Strava 应用未激活：需要有效的 Strava 订阅');
+            log('说明：2026-07 起 Strava 要求 API 应用所属账号必须有付费订阅，', 'err');
+            log('否则应用被标为 Inactive，所有接口都返回 403。', 'err');
+            log('解决：用【拥有该应用的账号】买订阅 → https://www.strava.com/settings/api 重新激活', 'err');
+          } else if (/refresh_token|授权失效|invalid_grant|unauthorized/i.test(m)) {
+            setStatus('Strava 授权已失效，请重新连接 Strava');
             log('提示：Strava 授权已失效，请重新连接 Strava', 'err');
+          } else {
+            setStatus('同步失败：' + m);
           }
         }
         els.rider.className = 'rider-emoji';
