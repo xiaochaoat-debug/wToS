@@ -104,11 +104,12 @@
   }
 
   // mode: body(签名放 body) / query(签名放 url) / header(签名放 header, 可能被 CORS 拦) / none
-  function otmList(token, mode) {
-    var payload = { page: 1, limit: 50 };
+  function otmList(token, mode, page) {
+    page = page || 1;
+    var payload = { page: page, limit: 50 };
     var sg = signFor(payload);
     var url = CFG.OTM_LIST;
-    var body = { page: 1, limit: 50 };
+    var body = { page: page, limit: 50 };
     var hdrs = otmHeaders(token);
 
     if (mode === 'body') {
@@ -123,9 +124,10 @@
     }).then(function (r) { return r.json(); });
   }
 
-  function oldList(token) {
+  function oldList(token, page) {
+    page = page || 1;
     var url = CFG.U_BASE + '/analysis/list?token=' + encodeURIComponent(token) +
-      '&limit=100&type=all&page=1';
+      '&limit=50&type=all&page=' + page;
     return request(url, {
       headers: { 'User-Agent': CFG.UA, 'Accept': 'application/json' }
     }).then(function (r) { return r.json(); });
@@ -140,38 +142,63 @@
     return null;
   }
 
-  // 依次尝试多种取列表方式，返回 { list, via, report }
+  // 依次尝试多种取列表方式，命中后自动翻页取全量；返回 { list, via, report }
   function onelapList(token) {
     var tries = [
-      { name: '新版OTM·签名在body', fn: function () { return otmList(token, 'body'); } },
-      { name: '新版OTM·签名在query', fn: function () { return otmList(token, 'query'); } },
-      { name: '新版OTM·无签名', fn: function () { return otmList(token, 'none'); } },
-      { name: '旧版analysis/list', fn: function () { return oldList(token); } }
+      { name: '新版OTM·签名在body', mode: 'body', old: false },
+      { name: '新版OTM·签名在query', mode: 'query', old: false },
+      { name: '新版OTM·无签名', mode: 'none', old: false },
+      { name: '旧版analysis/list', mode: 'old', old: true }
     ];
     var report = [];
     var i = 0;
 
-    function next() {
+    function call(t, page) {
+      return t.old ? oldList(token, page) : otmList(token, t.mode, page);
+    }
+
+    function probe() {
       if (i >= tries.length) {
         var err = new Error('所有取列表方式都失败');
         err.report = report;
         throw err;
       }
       var t = tries[i++];
-      return t.fn().then(function (j) {
+      return call(t, 1).then(function (j) {
         var list = pickList(j);
-        var line = t.name + ' → ' + JSON.stringify(j).slice(0, 220);
-        report.push(line);
-        if (list && list.length !== undefined) {
-          return { list: list, via: t.name, report: report };
-        }
-        return next();
+        report.push(t.name + ' → ' + JSON.stringify(j).slice(0, 200));
+        if (list) return { t: t, j: j, list: list };
+        return probe();
       }, function (e) {
         report.push(t.name + ' → 请求失败: ' + e.message);
-        return next();
+        return probe();
       });
     }
-    return next();
+
+    return probe().then(function (first) {
+      var all = first.list.slice();
+      var d = (first.j && first.j.data) || {};
+      var total = parseInt(d.total || 0, 10) || 0;
+      var pages = parseInt(d.pages || 0, 10) || 1;
+      var maxPage = Math.min(pages, 20);
+      var p = 1;
+
+      function more() {
+        if (p >= maxPage) return Promise.resolve();
+        if (total && all.length >= total) return Promise.resolve();
+        p++;
+        return call(first.t, p).then(function (j) {
+          var l = pickList(j);
+          if (l && l.length) all = all.concat(l);
+          else p = maxPage;
+        }, function () { p = maxPage; }).then(more);
+      }
+
+      return more().then(function () {
+        if (p > 1) report.push('翻页 ' + p + ' 页，共取到 ' + all.length + ' 条');
+        return { list: all, via: first.t.name, report: report };
+      });
+    });
   }
 
   // Strava：用 refresh_token 换 access_token（Strava 会轮换 refresh_token，必须回存）
@@ -525,8 +552,17 @@
         progress(28, '正在筛选最近 ' + sinceDays + ' 天的记录…');
         var acts = list.filter(function (a) { return startTimeOf(a) > since; });
         total = acts.length;
-        log('顽鹿共 ' + list.length + ' 条，范围内 ' + total + ' 条');
-        if (!total) throw { soft: true, msg: '最近 ' + sinceDays + ' 天没有顽鹿记录' };
+        log('顽鹿共取到 ' + list.length + ' 条，范围内 ' + total + ' 条');
+        if (!total) {
+          var newest = 0;
+          list.forEach(function (a) { var t = startTimeOf(a); if (t > newest) newest = t; });
+          var m = '最近 ' + sinceDays + ' 天没有顽鹿记录';
+          if (newest) {
+            m += '（最后一条是 ' + new Date(newest).toLocaleDateString('zh-CN') +
+              '，把同步范围调大一点就有）';
+          }
+          throw { soft: true, msg: m };
+        }
         return acts;
       })
       .then(function (acts) {
@@ -557,6 +593,8 @@
           if (times.some(function (t) { return Math.abs(t - startSec) < 180; })) { skipped++; return; }
           todo.push(a);
         });
+        // 从新到旧传，先同步最近的骑行
+        todo.sort(function (x, y) { return y.__startSec - x.__startSec; });
         pending = Math.max(0, todo.length - maxN);
         var batch = todo.slice(0, maxN);
         log('待上传 ' + todo.length + ' 条，本次处理 ' + batch.length + ' 条');
